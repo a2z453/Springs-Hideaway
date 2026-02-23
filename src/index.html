@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Springs Hideaway</title>
+    <style>
+        body { 
+            margin: 0; 
+            padding: 0;
+            overflow: hidden; 
+            background: #a8ca58; 
+            touch-action: none; /* stop the annoying pull-to-refresh */
+        }
+        canvas { display: block; image-rendering: pixelated; }
+    </style>
+</head>
+<body>
+    <canvas id="game"></canvas>
+
+    <script>
+        const canvas = document.getElementById('game');
+        const ctx = canvas.getContext('2d');
+
+        // simple settings
+        const size = 48;
+        const scale = 1;
+        
+        let camX = 0;
+        let camY = 0;
+        let zoom = 1; 
+
+        // map stuff
+        let map = null;
+        let layers = [];
+        const tileset = new Image();
+        tileset.src = './tiles/tiles.png';
+
+        // player sprite sheets
+        const walkImg = new Image(); walkImg.src = './sprites/foxWalk.png';
+        const idleImg = new Image(); idleImg.src = './sprites/foxIdle.png';
+        const runImg  = new Image(); runImg.src  = './sprites/foxRun.png';
+
+        const fox = {
+            x: 4158, // starting pos
+            y: 1448,
+            vx: 0,
+            vy: 0,
+            speed: 2,
+            runSpeed: 4,
+            dir: 2,
+            frame: 0,
+            animTick: 0,
+            targetX: null,
+            targetY: null,
+            isMoving: false,
+            isRunning: false
+        };
+
+        const input = {};
+        window.onkeydown = e => input[e.key] = true;
+        window.onkeyup = e => input[e.key] = false;
+
+        // water texture hack
+        const waterBuffer = document.createElement('canvas');
+        waterBuffer.width = 32;
+        waterBuffer.height = 32;
+        const wCtx = waterBuffer.getContext('2d');
+
+        function handleClick(e) {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = (e.clientX || e.touches[0].clientX) - rect.left;
+            const mouseY = (e.clientY || e.touches[0].clientY) - rect.top;
+
+            fox.targetX = (mouseX / zoom) + camX;
+            fox.targetY = (mouseY / zoom) + camY;
+        }
+
+        canvas.addEventListener('mousedown', handleClick);
+        canvas.addEventListener('mousemove', e => { if(e.buttons === 1) handleClick(e) });
+        canvas.addEventListener('touchstart', e => { e.preventDefault(); handleClick(e) }, {passive: false});
+        canvas.addEventListener('touchmove', e => { e.preventDefault(); handleClick(e) }, {passive: false});
+
+        // load map and start
+        fetch('./map.json').then(r => r.json()).then(data => {
+            map = data;
+            layers = data.layers;
+            
+            // init canvas
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            
+            window.requestAnimationFrame(loop);
+        });
+
+        window.onresize = () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        };
+
+        function getTile(tx, ty) {
+            if (tx < 0 || ty < 0 || tx >= map.mapWidth || ty >= map.mapHeight) return true;
+
+            const walls = ['Hills', 'Layer_3', 'Layer_4'];
+            let foundAny = false;
+
+            for (let i = 0; i < layers.length; i++) {
+                const l = layers[i];
+                if (!l.tiles) continue;
+                
+                // brute force search - maybe optimize later?
+                const t = l.tiles.find(tile => tile.x === tx && tile.y === ty);
+                if (t) {
+                    if (walls.includes(l.name)) return true;
+                    foundAny = true;
+                }
+            }
+            return !foundAny; // if nothing is there, it's a hole/solid
+        }
+
+        function checkHit(px, py) {
+            const bx = 12; // box size
+            const by = 8;
+            const ox = 0; 
+            const oy = 16;
+
+            const tx = Math.floor((px + ox) / size);
+            const ty = Math.floor((py + oy) / size);
+
+            // check corners
+            if (getTile(Math.floor((px-bx)/size), Math.floor((py+oy-by)/size))) return true;
+            if (getTile(Math.floor((px+bx)/size), Math.floor((py+oy-by)/size))) return true;
+            if (getTile(Math.floor((px-bx)/size), Math.floor((py+oy+by)/size))) return true;
+            if (getTile(Math.floor((px+bx)/size), Math.floor((py+oy+by)/size))) return true;
+
+            return false;
+        }
+
+        function update() {
+            fox.isMoving = false;
+            fox.isRunning = input['Shift'] ? true : false;
+            let s = fox.isRunning ? fox.runSpeed : fox.speed;
+
+            // keyboard kills touch target
+            if (input['w'] || input['s'] || input['a'] || input['d'] || input['ArrowUp'] || input['ArrowDown'] || input['ArrowLeft'] || input['ArrowRight']) {
+                fox.targetX = null;
+                fox.targetY = null;
+            }
+
+            let dx = 0, dy = 0;
+            if (input['w'] || input['ArrowUp']) { dy -= s; fox.dir = 1; fox.isMoving = true; }
+            if (input['s'] || input['ArrowDown']) { dy += s; fox.dir = 0; fox.isMoving = true; }
+            if (input['a'] || input['ArrowLeft']) { dx -= s; fox.dir = 2; fox.isMoving = true; }
+            if (input['d'] || input['ArrowRight']) { dx += s; fox.dir = 3; fox.isMoving = true; }
+
+            // click to move logic
+            if (fox.targetX !== null && !fox.isMoving) {
+                const dist = Math.hypot(fox.targetX - fox.x, fox.targetY - fox.y);
+                if (dist > 100) fox.isRunning = true;
+                s = fox.isRunning ? fox.runSpeed : fox.speed;
+
+                if (dist > s) {
+                    dx = ((fox.targetX - fox.x) / dist) * s;
+                    dy = ((fox.targetY - fox.y) / dist) * s;
+                    fox.isMoving = true;
+                    fox.dir = Math.abs(fox.targetX - fox.x) > Math.abs(fox.targetY - fox.y) ? (fox.targetX > fox.x ? 3 : 2) : (fox.targetY > fox.y ? 0 : 1);
+                } else {
+                    fox.x = fox.targetX; fox.y = fox.targetY;
+                    fox.targetX = null; fox.targetY = null;
+                }
+            }
+
+            // apply movement with basic slide collision
+            if (fox.isMoving) {
+                if (!checkHit(fox.x + dx, fox.y)) fox.x += dx; else fox.targetX = null;
+                if (!checkHit(fox.x, fox.y + dy)) fox.y += dy; else fox.targetY = null;
+            }
+
+            // animate
+            fox.animTick++;
+            if (fox.animTick >= 10) {
+                fox.animTick = 0;
+                let max = 4; // idle
+                if (fox.isMoving) max = fox.isRunning ? 6 : 6;
+                fox.frame = (fox.frame + 1) % max;
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            camX = Math.floor(fox.x - (canvas.width / 2) / zoom);
+            camY = Math.floor(fox.y - (canvas.height / 2) / zoom);
+
+            ctx.save();
+            ctx.scale(zoom, zoom);
+            ctx.translate(-camX, -camY);
+
+            // draw water background
+            wCtx.fillStyle = '#3a8ebf';
+            wCtx.fillRect(0,0,32,32);
+            wCtx.fillStyle = '#5fb2e3';
+            let wave = Math.sin(Date.now()/400)*4;
+            wCtx.fillRect(8+wave, 8, 8, 4);
+            wCtx.fillRect(20-wave, 20, 8, 4);
+            
+            ctx.fillStyle = ctx.createPattern(waterBuffer, 'repeat');
+            ctx.fillRect(camX-50, camY-50, (canvas.width/zoom)+100, (canvas.height/zoom)+100);
+
+            // render map
+            const cols = tileset.width / size;
+            for (let j = layers.length - 1; j >= 0; j--) {
+                const l = layers[j];
+                if (!l.tiles) continue;
+                for (let i = 0; i < l.tiles.length; i++) {
+                    const t = l.tiles[i];
+                    const id = parseInt(t.id);
+                    ctx.drawImage(tileset, (id % cols)*size, Math.floor(id/cols)*size, size, size, t.x*size, t.y*size, size, size);
+                }
+            }
+
+            // draw player
+            let sheet = idleImg;
+            let d = fox.dir;
+            if (fox.isMoving) {
+                sheet = fox.isRunning ? runImg : walkImg;
+                if (fox.isRunning) { // specific swap for run sheet dir
+                    if (d === 2) d = 3; else if (d === 3) d = 2;
+                }
+            }
+            ctx.drawImage(sheet, fox.frame * 64, d * 64, 64, 64, Math.floor(fox.x - 32), Math.floor(fox.y - 32), 64, 64);
+
+            ctx.restore();
+        }
+
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+    </script>
+</body>
+</html>
